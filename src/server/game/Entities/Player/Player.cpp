@@ -1728,7 +1728,7 @@ void Player::SetObjectScale(float scale)
     SetBoundingRadius(scale * DEFAULT_PLAYER_BOUNDING_RADIUS);
     SetCombatReach(scale * DEFAULT_PLAYER_COMBAT_REACH);
     if (IsInWorld())
-        SendMovementSetCollisionHeight(scale * GetCollisionHeight(IsMounted()));
+        SendMovementSetCollisionHeight(scale * GetCollisionHeight(IsMounted()), WorldPackets::Movement::UpdateCollisionHeightReason::Scale);
 }
 
 bool Player::IsImmunedToSpellEffect(SpellInfo const* spellInfo, uint32 index, Unit* caster) const
@@ -2575,8 +2575,7 @@ void Player::InitStatsForLevel(bool reapplyMods)
     SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::ParryPercentage), 0.0f);
     SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::BlockPercentage), 0.0f);
 
-    // Static 30% damage blocked
-    SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::ShieldBlock), 30);
+    SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::ShieldBlock), 0);
 
     // Dodge percentage
     SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::DodgePercentage), 0.0f);
@@ -7725,7 +7724,11 @@ void Player::_ApplyItemBonuses(Item* item, uint8 slot, bool apply)
     }
 
     if (uint32 armor = proto->GetArmor(itemLevel))
+    {
         HandleStatFlatModifier(UNIT_MOD_ARMOR, BASE_VALUE, float(armor), apply);
+        if (proto->GetClass() == ITEM_CLASS_ARMOR && proto->GetSubClass() == ITEM_SUBCLASS_ARMOR_SHIELD)
+            SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::ShieldBlock), apply ? int32(armor * 2.5f) : 0);
+    }
 
     WeaponAttackType attType = GetAttackBySlot(slot, proto->GetInventoryType());
     if (attType != MAX_ATTACK && CanUseAttackType(attType))
@@ -25791,6 +25794,17 @@ void Player::ProcessTerrainStatusUpdate(ZLiquidStatus status, Optional<LiquidDat
         m_MirrorTimerFlags &= ~(UNDERWATER_INWATER | UNDERWATER_INLAVA | UNDERWATER_INSLIME | UNDERWATER_INDARKWATER);
 }
 
+float Player::GetBlockPercent(uint8 attackerLevel) const
+{
+    float blockArmor = float(*m_activePlayerData->ShieldBlock);
+    float armorConstant = sDB2Manager.EvaluateExpectedStat(ExpectedStatType::ArmorConstant, attackerLevel, -2, 0, CLASS_NONE);
+
+    if (!(blockArmor + armorConstant))
+        return 0;
+
+    return std::min(blockArmor / (blockArmor + armorConstant), 0.85f);
+}
+
 void Player::SetCanParry(bool value)
 {
     if (m_canParry == value)
@@ -27970,7 +27984,7 @@ void Player::DeleteGarrison()
     }
 }
 
-void Player::SendMovementSetCollisionHeight(float height)
+void Player::SendMovementSetCollisionHeight(float height, WorldPackets::Movement::UpdateCollisionHeightReason reason)
 {
     WorldPackets::Movement::MoveSetCollisionHeight setCollisionHeight;
     setCollisionHeight.MoverGUID = GetGUID();
@@ -27979,7 +27993,7 @@ void Player::SendMovementSetCollisionHeight(float height)
     setCollisionHeight.Scale = GetObjectScale();
     setCollisionHeight.MountDisplayID = GetMountDisplayId();
     setCollisionHeight.ScaleDuration = m_unitData->ScaleDuration;
-    setCollisionHeight.Reason = WorldPackets::Movement::UPDATE_COLLISION_HEIGHT_MOUNT;
+    setCollisionHeight.Reason = reason;
     SendDirectMessage(setCollisionHeight.Write());
 
     WorldPackets::Movement::MoveUpdateCollisionHeight updateCollisionHeight;

@@ -854,7 +854,10 @@ uint32 Unit::DealDamage(Unit* victim, uint32 damage, CleanDamage const* cleanDam
 
     if (victim->GetTypeId() == TYPEID_PLAYER)
         victim->ToPlayer()->UpdateCriteria(CRITERIA_TYPE_HIGHEST_HIT_RECEIVED, damage);
-    else if (!victim->IsControlledByPlayer() || victim->IsVehicle())
+
+    damage /= victim->GetHealthMultiplierForTarget(this);
+
+    if (victim->GetTypeId() != TYPEID_PLAYER && (!victim->IsControlledByPlayer() || victim->IsVehicle()))
     {
         if (!victim->ToCreature()->hasLootRecipient())
             victim->ToCreature()->SetLootRecipient(this);
@@ -862,8 +865,6 @@ uint32 Unit::DealDamage(Unit* victim, uint32 damage, CleanDamage const* cleanDam
         if (IsControlledByPlayer())
             victim->ToCreature()->LowerPlayerDamageReq(health < damage ?  health : damage);
     }
-
-    damage /= victim->GetHealthMultiplierForTarget(this);
 
     if (health <= damage)
     {
@@ -1083,7 +1084,7 @@ void Unit::CastSpell(float x, float y, float z, uint32 spellId, TriggerCastFlags
     CastSpell(targets, spellInfo, nullptr, triggerFlags, castItem, triggeredByAura, originalCaster);
 }
 
-void Unit::CastSpell(GameObject* go, uint32 spellId, bool triggered, Item* castItem, AuraEffect* triggeredByAura, ObjectGuid originalCaster)
+void Unit::CastSpell(GameObject* go, uint32 spellId, bool triggered, Item* castItem, AuraEffect const* triggeredByAura, ObjectGuid originalCaster)
 {
     SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId, GetMap()->GetDifficultyID());
     if (!spellInfo)
@@ -1155,7 +1156,7 @@ void Unit::CalculateSpellDamageTaken(SpellNonMeleeDamage* damageInfo, int32 dama
                 if (blocked)
                 {
                     // double blocked amount if block is critical
-                    uint32 value = victim->GetBlockPercent();
+                    uint32 value = victim->GetBlockPercent(getLevel());
                     if (victim->isBlockCritical())
                         value *= 2; // double blocked percent
                     damageInfo->blocked = CalculatePct(damage, value);
@@ -1362,7 +1363,7 @@ void Unit::CalculateMeleeDamage(Unit* victim, uint32 damage, CalcDamageInfo* dam
             damageInfo->HitInfo    |= HITINFO_BLOCK;
             damageInfo->originalDamage = damageInfo->damage;
             // 30% damage blocked, double blocked amount if block is critical
-            damageInfo->blocked_amount = CalculatePct(damageInfo->damage, damageInfo->target->isBlockCritical() ? damageInfo->target->GetBlockPercent() * 2 : damageInfo->target->GetBlockPercent());
+            damageInfo->blocked_amount = CalculatePct(damageInfo->damage, damageInfo->target->isBlockCritical() ? damageInfo->target->GetBlockPercent(getLevel()) * 2 : damageInfo->target->GetBlockPercent(getLevel()));
             damageInfo->damage      -= damageInfo->blocked_amount;
             damageInfo->cleanDamage += damageInfo->blocked_amount;
             break;
@@ -1648,7 +1649,7 @@ uint32 Unit::CalcArmorReducedDamage(Unit* attacker, Unit* victim, const uint32 d
     // Expansion and ContentTuningID necessary? Does Player get a ContentTuningID too ?
     float armorConstant = sDB2Manager.EvaluateExpectedStat(ExpectedStatType::ArmorConstant, attackerLevel, -2, 0, Classes(attacker->getClass()));
 
-    if (!armorConstant)
+    if (!(armor + armorConstant))
         return damage;
 
     float mitigation = std::min(armor / (armor + armorConstant), 0.85f);
@@ -6857,11 +6858,14 @@ uint32 Unit::SpellDamageBonusTaken(Unit* caster, SpellInfo const* spellProto, ui
         TakenTotalMod *= GetTotalAuraMultiplierByMiscMask(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN, spellProto->GetSchoolMask());
 
         // From caster spells
+        TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_SCHOOL_MASK_DAMAGE_FROM_CASTER, [caster, spellProto](AuraEffect const* aurEff) -> bool
+        {
+            return aurEff->GetCasterGUID() == caster->GetGUID() && (aurEff->GetMiscValue() & spellProto->GetSchoolMask());
+        });
+
         TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_SPELL_DAMAGE_FROM_CASTER, [caster, spellProto](AuraEffect const* aurEff) -> bool
         {
-            if (aurEff->GetCasterGUID() == caster->GetGUID() && aurEff->IsAffectingSpell(spellProto))
-                return true;
-            return false;
+            return aurEff->GetCasterGUID() == caster->GetGUID() && aurEff->IsAffectingSpell(spellProto);
         });
 
         int32 TakenAdvertisedBenefit = SpellBaseDamageBonusTaken(spellProto->GetSchoolMask());
@@ -7609,11 +7613,11 @@ uint32 Unit::MeleeDamageBonusDone(Unit* victim, uint32 pdamage, WeaponAttackType
     // Done total percent damage auras
     float DoneTotalMod = 1.0f;
 
-    // Some spells don't benefit from pct done mods
-    if (spellProto && !spellProto->HasAttribute(SPELL_ATTR6_NO_DONE_PCT_DAMAGE_MODS))
+    if (spellProto)
     {
+        // Some spells don't benefit from pct done mods
         // mods for SPELL_SCHOOL_MASK_NORMAL are already factored in base melee damage calculation
-        if (!(spellProto->GetSchoolMask() & SPELL_SCHOOL_MASK_NORMAL))
+        if (!spellProto->HasAttribute(SPELL_ATTR6_NO_DONE_PCT_DAMAGE_MODS) && !(spellProto->GetSchoolMask() & SPELL_SCHOOL_MASK_NORMAL))
         {
             float maxModDamagePercentSchool = 0.0f;
             if (Player const* thisPlayer = ToPlayer())
@@ -7627,6 +7631,12 @@ uint32 Unit::MeleeDamageBonusDone(Unit* victim, uint32 pdamage, WeaponAttackType
 
             DoneTotalMod *= maxModDamagePercentSchool;
         }
+    }
+    else
+    {
+        // melee attack
+        for (AuraEffect const* autoAttackDamage : GetAuraEffectsByType(SPELL_AURA_MOD_AUTOATTACK_DAMAGE))
+            AddPct(DoneTotalMod, autoAttackDamage->GetAmount());
     }
 
     DoneTotalMod *= GetTotalAuraMultiplierByMiscMask(SPELL_AURA_MOD_DAMAGE_DONE_VERSUS, creatureTypeMask);
@@ -7684,11 +7694,14 @@ uint32 Unit::MeleeDamageBonusTaken(Unit* attacker, uint32 pdamage, WeaponAttackT
     if (spellProto)
     {
         // From caster spells
+        TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_SCHOOL_MASK_DAMAGE_FROM_CASTER, [attacker, spellProto](AuraEffect const* aurEff) -> bool
+        {
+            return aurEff->GetCasterGUID() == attacker->GetGUID() && (aurEff->GetMiscValue() & spellProto->GetSchoolMask());
+        });
+
         TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_SPELL_DAMAGE_FROM_CASTER, [attacker, spellProto](AuraEffect const* aurEff) -> bool
         {
-            if (aurEff->GetCasterGUID() == attacker->GetGUID() && aurEff->IsAffectingSpell(spellProto))
-                return true;
-            return false;
+            return aurEff->GetCasterGUID() == attacker->GetGUID() && aurEff->IsAffectingSpell(spellProto);
         });
 
         // Mod damage from spell mechanic
@@ -7826,7 +7839,7 @@ void Unit::Mount(uint32 mount, uint32 VehicleId, uint32 creatureEntry)
             if (charm->GetTypeId() == TYPEID_UNIT)
                 charm->AddUnitFlag(UNIT_FLAG_STUNNED);
 
-        player->SendMovementSetCollisionHeight(player->GetCollisionHeight(true));
+        player->SendMovementSetCollisionHeight(player->GetCollisionHeight(true), WorldPackets::Movement::UpdateCollisionHeightReason::Mount);
     }
 
     RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_MOUNT);
@@ -7841,7 +7854,7 @@ void Unit::Dismount()
     RemoveUnitFlag(UNIT_FLAG_MOUNT);
 
     if (Player* thisPlayer = ToPlayer())
-        thisPlayer->SendMovementSetCollisionHeight(thisPlayer->GetCollisionHeight(false));
+        thisPlayer->SendMovementSetCollisionHeight(thisPlayer->GetCollisionHeight(false), WorldPackets::Movement::UpdateCollisionHeightReason::Mount);
 
     WorldPackets::Misc::Dismount data;
     data.Guid = GetGUID();

@@ -103,6 +103,11 @@ namespace WorldPackets
     {
         struct CharacterCreateInfo;
     }
+
+    namespace Movement
+    {
+        enum class UpdateCollisionHeightReason : uint8;
+    }
 }
 
 typedef std::deque<Mail*> PlayerMails;
@@ -2020,7 +2025,7 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
         int32 CalculateCorpseReclaimDelay(bool load = false) const;
         void SendCorpseReclaimDelay(uint32 delay) const;
 
-        uint32 GetBlockPercent() const override { return m_activePlayerData->ShieldBlock; }
+        float GetBlockPercent(uint8 attackerLevel) const override;
         bool CanParry() const { return m_canParry; }
         void SetCanParry(bool value);
         bool CanBlock() const { return m_canBlock; }
@@ -2375,7 +2380,7 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
 
         void ValidateMovementInfo(MovementInfo* mi);
 
-        void SendMovementSetCollisionHeight(float height);
+        void SendMovementSetCollisionHeight(float height, WorldPackets::Movement::UpdateCollisionHeightReason reason);
 
         bool CanFly() const override { return m_movementInfo.HasMovementFlag(MOVEMENTFLAG_CAN_FLY); }
 
